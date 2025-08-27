@@ -85,3 +85,24 @@ def convert_coco_to_openpose_batch(keypoints: np.ndarray, scores: np.ndarray) ->
     keypoints_out = new_keypoints_info[..., :2].cpu().numpy()
     scores_out = new_keypoints_info[..., 2].cpu().numpy()
     return keypoints_out, scores_out
+
+
+
+
+def get_simcc_maximum_torch(simcc_x: torch.Tensor, simcc_y: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Batch max response from SimCC. Torch tensors; output torch.
+    """
+    N, K, Wx = simcc_x.shape
+    _, _, Wy = simcc_y.shape
+    simcc_x_flat = simcc_x.view(N*K, Wx)
+    simcc_y_flat = simcc_y.view(N*K, Wy)
+    x_locs = torch.argmax(simcc_x_flat, dim=1)
+    y_locs = torch.argmax(simcc_y_flat, dim=1)
+    locs = torch.stack((x_locs, y_locs), dim=-1).float().view(N, K, 2)
+    max_val_x = torch.amax(simcc_x_flat, dim=1)
+    max_val_y = torch.amax(simcc_y_flat, dim=1)
+    vals = 0.5 * (max_val_x + max_val_y)
+    vals = vals.view(N, K)
+    locs[vals <= 0.] = -1
+    return locs, valss
