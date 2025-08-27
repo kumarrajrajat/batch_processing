@@ -27,23 +27,44 @@ def postprocess_batch(
 
 
 
-def get_simcc_maximum_torch(simcc_x: torch.Tensor, simcc_y: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+import torch
+import numpy as np
+from typing import Tuple
+
+def get_simcc_maximum_batch(simcc_x: np.ndarray, simcc_y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Batch max response from SimCC. Torch tensors; output torch.
+    Batch SimCC Maximum with NumPy input/output and Torch tensor internals on GPU.
+    Args:
+        simcc_x (np.ndarray): shape [N, K, Wx]
+        simcc_y (np.ndarray): shape [N, K, Wy]
+    Returns:
+        locs (np.ndarray): [N, K, 2] float32
+        vals (np.ndarray): [N, K] float32
     """
-    N, K, Wx = simcc_x.shape
-    _, _, Wy = simcc_y.shape
-    simcc_x_flat = simcc_x.view(N*K, Wx)
-    simcc_y_flat = simcc_y.view(N*K, Wy)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # Convert to torch tensor on device
+    simcc_x_t = torch.from_numpy(simcc_x).float().to(device)
+    simcc_y_t = torch.from_numpy(simcc_y).float().to(device)
+
+    N, K, Wx = simcc_x_t.shape
+    _, _, Wy = simcc_y_t.shape
+    simcc_x_flat = simcc_x_t.view(N * K, Wx)
+    simcc_y_flat = simcc_y_t.view(N * K, Wy)
+
     x_locs = torch.argmax(simcc_x_flat, dim=1)
     y_locs = torch.argmax(simcc_y_flat, dim=1)
     locs = torch.stack((x_locs, y_locs), dim=-1).float().view(N, K, 2)
+
     max_val_x = torch.amax(simcc_x_flat, dim=1)
     max_val_y = torch.amax(simcc_y_flat, dim=1)
     vals = 0.5 * (max_val_x + max_val_y)
     vals = vals.view(N, K)
+
     locs[vals <= 0.] = -1
-    return locs, vals
+
+    # Return numpy arrays (copied to CPU)
+    return locs.cpu().numpy(), vals.cpu().numpy()
+
 
 
 
