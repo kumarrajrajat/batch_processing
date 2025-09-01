@@ -4,18 +4,17 @@ import pycuda.driver as cuda
 import pycuda.autoinit
 import warnings
 
-# Fix numpy compatibility
-warnings.filterwarnings("ignore", message=".*np.bool.*")
-if not hasattr(np, 'bool'):
-    np.bool = bool
+# FIXES
+warnings.filterwarnings("ignore")
+if not hasattr(np, 'bool'): np.bool = bool
 
-def tensorrt_no_memory_error(engine_path, input_array):
+def fixed_dynamic_tensorrt(engine_path, input_data, batch_size=1):
     """
-    TensorRT inference that avoids cuMemHostAlloc memory errors
-    Uses regular memory instead of pinned memory
+    Fixed TensorRT inference for dynamic batch models
+    Your model: input (-1, 3, 256, 192), output (-1, 133, 384)
     """
 
-    print("🔧 Loading engine without pinned memory...")
+    print(f"🔧 Loading dynamic model (batch_size={batch_size})")
 
     # Load engine
     with open(engine_path, 'rb') as f:
@@ -23,71 +22,67 @@ def tensorrt_no_memory_error(engine_path, input_array):
         engine = runtime.deserialize_cuda_engine(f.read())
         context = engine.create_execution_context()
 
-    # Get model info
-    input_shape = engine.get_binding_shape(0)
-    output_shape = engine.get_binding_shape(1)
-    input_dtype = trt.nptype(engine.get_binding_dtype(0))
-    output_dtype = trt.nptype(engine.get_binding_dtype(1))
+    # Use MODERN API (fixes deprecation warning)
+    input_name = engine.get_tensor_name(0)
+    output_name = engine.get_tensor_name(1)
 
-    print(f"📋 Input: {input_shape} ({input_dtype.__name__})")
-    print(f"📋 Output: {output_shape} ({output_dtype.__name__})")
+    # Get original shapes (with -1)
+    input_shape = engine.get_tensor_shape(input_name)
+    output_shape = engine.get_tensor_shape(output_name)
+
+    print(f"📋 Original shapes: input={input_shape}, output={output_shape}")
+
+    # Replace -1 with actual batch_size
+    fixed_input_shape = tuple(batch_size if dim == -1 else dim for dim in input_shape)
+
+    print(f"📋 Fixed input shape: {fixed_input_shape}")
+
+    # Set the input shape (this fixes "negative dimensions" error)
+    context.set_input_shape(input_name, fixed_input_shape)
+
+    # Get updated output shape
+    fixed_output_shape = context.get_tensor_shape(output_name)
+    print(f"📋 Fixed output shape: {fixed_output_shape}")
 
     # Prepare input
-    input_array = input_array.astype(input_dtype).reshape(input_shape)
+    input_data = input_data.astype(np.float32).reshape(fixed_input_shape)
 
-    # Use REGULAR numpy arrays (NOT pinned memory)
-    # This prevents cuMemHostAlloc errors
-    host_input = np.ascontiguousarray(input_array)
-    host_output = np.empty(output_shape, dtype=output_dtype)
+    # Allocate memory (regular arrays - no cuMemHostAlloc error)
+    h_input = np.ascontiguousarray(input_data)
+    h_output = np.empty(fixed_output_shape, dtype=np.float32)
 
-    print(f"💾 Host memory allocated: {host_input.nbytes / (1024*1024):.2f} MB")
+    d_input = cuda.mem_alloc(h_input.nbytes)
+    d_output = cuda.mem_alloc(h_output.nbytes)
 
-    # Allocate GPU memory
-    device_input = cuda.mem_alloc(host_input.nbytes)
-    device_output = cuda.mem_alloc(host_output.nbytes)
+    # Set tensor addresses (modern API)
+    context.set_tensor_address(input_name, int(d_input))
+    context.set_tensor_address(output_name, int(d_output))
 
-    print("💾 GPU memory allocated successfully")
+    # Transfer and execute
+    cuda.memcpy_htod(d_input, h_input)
+    context.execute_async_v3(stream_handle=0)
+    cuda.memcpy_dtoh(h_output, d_output)
 
-    # Copy data to GPU
-    cuda.memcpy_htod(device_input, host_input)
+    # Cleanup
+    d_input.free()
+    d_output.free()
 
-    # Run inference
-    print("⚡ Running inference...")
-    success = context.execute_v2([int(device_input), int(device_output)])
+    print("✅ Dynamic inference completed!")
+    return [h_output]
 
-    if not success:
-        raise RuntimeError("Inference failed")
-
-    # Copy result back
-    cuda.memcpy_dtoh(host_output, device_output)
-
-    # Cleanup GPU memory
-    device_input.free()
-    device_output.free()
-
-    print("✅ Inference completed successfully!")
-    return [host_output]
-
-# USAGE EXAMPLE
+# USAGE for your specific model
 if __name__ == "__main__":
-    print("🚀 TensorRT Memory Error Fix")
-    print("=" * 35)
-
-    # Your settings
     engine_file = "your_model.engine"  # ← Change this
-    test_input = np.random.rand(1, 3, 224, 224).astype(np.float32)  # ← Change this
+    batch_size = 1  # ← Change this if needed
+
+    # Your model input: (-1, 3, 256, 192) -> (1, 3, 256, 192)
+    test_input = np.random.rand(batch_size, 3, 256, 192).astype(np.float32)
 
     try:
-        outputs = tensorrt_no_memory_error(engine_file, test_input)
+        outputs = fixed_dynamic_tensorrt(engine_file, test_input, batch_size)
 
         print(f"🎉 SUCCESS!")
-        for i, output in enumerate(outputs):
-            print(f"   Output {i}: {output.shape} {output.dtype}")
+        print(f"Output shape: {outputs[0].shape}")  # Should be (1, 133, 384)
 
-    except FileNotFoundError:
-        print("❌ Engine file not found - update the engine_file path")
     except Exception as e:
         print(f"❌ Error: {e}")
-
-    print("\n💡 This version avoids cuMemHostAlloc by using regular memory")
-    print("   It's slightly slower but much more reliable!")
