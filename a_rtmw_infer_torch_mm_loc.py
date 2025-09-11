@@ -25,6 +25,14 @@ def cleanup_all():
 
 atexit.register(cleanup_all)
 
+def tensorrt_dims_to_tuple(dims):
+    """Convert TensorRT Dims to tuple of integers"""
+    if hasattr(dims, '__len__'):
+        return tuple(dims)
+    else:
+        # Handle different TensorRT versions
+        return tuple([dims[i] for i in range(len(dims))])
+
 class TensorRTInference:
     """TensorRT inference using PyTorch tensors for memory management"""
     
@@ -87,9 +95,18 @@ class TensorRTInference:
         input_shape = (batch_size, 3, 256, 256)  # Change for your model
         self.context.set_input_shape(input_name, input_shape)
         
-        # Get output shapes
-        output1_shape = self.context.get_tensor_shape(output1_name)
-        output2_shape = self.context.get_tensor_shape(output2_name)
+        # Get output shapes and convert TensorRT Dims to tuples
+        output1_dims = self.context.get_tensor_shape(output1_name)
+        output2_dims = self.context.get_tensor_shape(output2_name)
+        
+        # Convert TensorRT Dims to Python tuples
+        output1_shape = tensorrt_dims_to_tuple(output1_dims)
+        output2_shape = tensorrt_dims_to_tuple(output2_dims)
+        
+        print(f"📋 Tensor shapes:")
+        print(f"   Input: {input_shape}")
+        print(f"   Output1: {output1_shape} (from {type(output1_dims)})")
+        print(f"   Output2: {output2_shape} (from {type(output2_dims)})")
         
         # Ensure input tensor has correct shape
         if input_tensor.shape != input_shape:
@@ -98,7 +115,7 @@ class TensorRTInference:
         # Make sure tensor is contiguous
         input_tensor = input_tensor.contiguous()
         
-        # Allocate output tensors using PyTorch
+        # Allocate output tensors using PyTorch with converted shapes
         output1_tensor = torch.empty(output1_shape, dtype=torch.float32, device=self.device)
         output2_tensor = torch.empty(output2_shape, dtype=torch.float32, device=self.device)
         
@@ -124,11 +141,12 @@ class TensorRTInference:
             output1_np = output1_tensor.cpu().numpy()
             output2_np = output2_tensor.cpu().numpy()
             
+            print(f"✅ Inference completed! Output shapes: {output1_np.shape}, {output2_np.shape}")
+            
             return [output1_np, output2_np]
             
         finally:
             # PyTorch handles memory cleanup automatically
-            # Just ensure synchronization
             torch.cuda.synchronize()
             gc.collect()
 
@@ -153,16 +171,19 @@ class TensorRTInference:
         input_shape = (batch_size, 3, 256, 256)
         self.context.set_input_shape(input_name, input_shape)
         
-        # Get output shapes
-        output1_shape = self.context.get_tensor_shape(output1_name)
-        output2_shape = self.context.get_tensor_shape(output2_name)
+        # Get output shapes and convert to tuples
+        output1_dims = self.context.get_tensor_shape(output1_name)
+        output2_dims = self.context.get_tensor_shape(output2_name)
+        
+        output1_shape = tensorrt_dims_to_tuple(output1_dims)
+        output2_shape = tensorrt_dims_to_tuple(output2_dims)
         
         # Ensure input tensor has correct shape and is contiguous
         if input_tensor.shape != input_shape:
             input_tensor = input_tensor.reshape(input_shape)
         input_tensor = input_tensor.contiguous()
         
-        # Allocate output tensors
+        # Allocate output tensors with converted shapes
         output1_tensor = torch.empty(output1_shape, dtype=torch.float32, device=self.device).contiguous()
         output2_tensor = torch.empty(output2_shape, dtype=torch.float32, device=self.device).contiguous()
         
@@ -179,6 +200,8 @@ class TensorRTInference:
             
             # Synchronize
             torch.cuda.synchronize()
+            
+            print(f"✅ Torch inference completed! Output shapes: {output1_tensor.shape}, {output2_tensor.shape}")
             
             # Return PyTorch tensors directly
             return [output1_tensor, output2_tensor]
