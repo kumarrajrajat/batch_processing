@@ -1,0 +1,29 @@
+# Compact Base Dockerfile (Essential dependencies only)
+FROM nvidia/cuda:12.1-cudnn8-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Install essential dependencies only
+RUN apt-get update && apt-get install -y \
+    build-essential cmake ninja-build pkg-config \
+    software-properties-common wget curl git \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.10 python3.10-dev python3.10-distutils \
+    # Essential for MMCV/OpenCV
+    libjpeg-dev libpng-dev libavcodec-dev libavformat-dev \
+    # Essential for NumPy optimization
+    libblas-dev liblapack-dev \
+    # Essential for display
+    libgl1-mesa-glx libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up Python
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 \
+    && pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+
+ENV FORCE_CUDA=1 MMCV_WITH_OPS=1
+WORKDIR /workspace
+CMD ["/bin/bash"]
