@@ -1,5 +1,5 @@
-# BULLETPROOF VERSION - RTMPose End-to-End Converter 
-# Completely avoids problematic dynamic shape operations
+# OPSET 11 COMPATIBLE VERSION - RTMPose End-to-End Converter 
+# Fixed ONNX operator compatibility issues
 
 import onnx
 from onnx import helper, TensorProto
@@ -9,7 +9,7 @@ class RTMPoseEndToEndConverter:
     """
     Complete implementation to convert RTMPose ONNX model to end-to-end 
     with embedded SIMCC post-processing (same pattern as YoloX NMS integration)
-    BULLETPROOF VERSION - Avoids all complex shape tensor operations
+    OPSET 11 COMPATIBLE VERSION - All operators work in older ONNX Runtime versions
     """
     
     def __init__(self, simcc_split_ratio=2.0, model_input_size=(256, 192)):
@@ -31,6 +31,13 @@ class RTMPoseEndToEndConverter:
         print("🔄 Loading RTMPose backbone model...")
         onnx_model = onnx.load(backbone_model_path)
         graph = onnx_model.graph
+        
+        # *** KEY FIX: Set opset version explicitly for compatibility ***
+        # Remove existing opset imports and add opset 11
+        del onnx_model.opset_import[:]
+        opset = onnx_model.opset_import.add()
+        opset.domain = ""
+        opset.version = 11  # Use opset 11 for maximum compatibility
         
         print("🔄 Adding SIMCC post-processing nodes...")
         # Add your complete post-processing logic as ONNX nodes
@@ -56,24 +63,40 @@ class RTMPoseEndToEndConverter:
         print("📊 New model signature:")
         print("   Inputs: input [N,3,H,W], centers [N,2], scales [N,2]")
         print("   Outputs: final_keypoints [N,17,2], final_scores [N,17]")
+        print(f"   Opset: 11 (compatible with older ONNX Runtime)")
         
         return output_model_path
     
+    def _create_less_or_equal_nodes(self, input_a, input_b, output_name, nodes):
+        """Create LessOrEqual equivalent using opset 11 compatible operators"""
+        
+        # a < b
+        less_node = helper.make_node('Less', [input_a, input_b], [f'{output_name}_less'])
+        nodes.append(less_node)
+        
+        # a == b  
+        equal_node = helper.make_node('Equal', [input_a, input_b], [f'{output_name}_equal'])
+        nodes.append(equal_node)
+        
+        # (a < b) OR (a == b) = LessOrEqual
+        or_node = helper.make_node('Or', [f'{output_name}_less', f'{output_name}_equal'], [output_name])
+        nodes.append(or_node)
+        
+        return nodes
+    
     def _create_complete_postprocess_nodes(self):
         """
-        BULLETPROOF VERSION - Avoids all problematic dynamic shape operations
-        Uses only simple, reliable ONNX patterns
+        OPSET 11 COMPATIBLE VERSION - All operators available in opset 11
+        Create all ONNX nodes that replicate your exact postprocess() and get_simcc_maximum_torch() logic
         """
         nodes = []
         
-        # === Part 1: Simple flattening (avoids complex reshape) ===
+        # === Part 1: Simple flattening ===
         
-        # Flatten to 2D - much simpler than manual reshape
-        # simcc_x: [N, K, W] -> [N*K, W]
+        # Flatten to 2D - simpler than manual reshape
         simcc_x_flat = helper.make_node('Flatten', ['simcc_x'], ['simcc_x_flat'], axis=1)
         nodes.append(simcc_x_flat)
         
-        # simcc_y: [N, K, H] -> [N*K, H]
         simcc_y_flat = helper.make_node('Flatten', ['simcc_y'], ['simcc_y_flat'], axis=1)
         nodes.append(simcc_y_flat)
         
@@ -117,11 +140,11 @@ class RTMPoseEndToEndConverter:
         vals_flat = helper.make_node('Mul', ['vals_sum', 'half'], ['vals_flat'])
         nodes.append(vals_flat)
         
-        # === Part 3: Masking logic (simplified) ===
+        # === Part 3: Masking logic (OPSET 11 COMPATIBLE) ===
         
-        # Invalid mask: vals <= 0
-        invalid_mask = helper.make_node('LessOrEqual', ['vals_flat', 'zero_f'], ['invalid_mask'])
-        nodes.append(invalid_mask)
+        # *** FIXED: Replace LessOrEqual with compatible operators ***
+        # Invalid mask: vals <= 0 → (vals < 0) OR (vals == 0)
+        self._create_less_or_equal_nodes('vals_flat', 'zero_f', 'invalid_mask', nodes)
         
         # Apply invalid mask to locations: set to -1
         invalid_2d = helper.make_node('Unsqueeze', ['invalid_mask'], ['invalid_2d'], axes=[-1])
@@ -162,7 +185,7 @@ class RTMPoseEndToEndConverter:
         vals_final_flat = helper.make_node('Where', ['failure_1d', 'zero_f', 'vals_flat'], ['vals_final_flat'])
         nodes.append(vals_final_flat)
         
-        # === Part 4: Reshape back to [N, K, 2] and [N, K] using SIMPLE approach ===
+        # === Part 4: Reshape back to [N, K, 2] and [N, K] ===
         
         # Get original shape for reshaping
         shape_x = helper.make_node('Shape', ['simcc_x'], ['shape_x'])
@@ -175,20 +198,16 @@ class RTMPoseEndToEndConverter:
         k_dim = helper.make_node('Gather', ['shape_x', 'one_idx'], ['K'], axis=0)
         nodes.append(k_dim)
         
-        # *** KEY FIX: Use Reshape with static patterns instead of Concat ***
-        
-        # For locs: reshape [N*K, 2] -> [N, K, 2]
-        # Use the batch dimension from simcc_x and infer the rest
+        # Use static reshape patterns (avoids complex shape concatenation)
         locs_reshaped = helper.make_node('Reshape', ['locs_final_flat', 'nk2_target_shape'], ['locs_reshaped'])
         nodes.append(locs_reshaped)
         
-        # For vals: reshape [N*K] -> [N, K]  
         vals_reshaped = helper.make_node('Reshape', ['vals_final_flat', 'nk_target_shape'], ['vals_reshaped'])
         nodes.append(vals_reshaped)
         
-        # Final invalid mask for locs
-        final_invalid = helper.make_node('LessOrEqual', ['vals_reshaped', 'zero_f'], ['final_invalid'])
-        nodes.append(final_invalid)
+        # *** FIXED: Final invalid mask using opset 11 compatible operators ***
+        # Final invalid mask: vals <= 0 → (vals < 0) OR (vals == 0)
+        self._create_less_or_equal_nodes('vals_reshaped', 'zero_f', 'final_invalid', nodes)
         
         final_invalid_2d = helper.make_node('Unsqueeze', ['final_invalid'], ['final_invalid_2d'], axes=[-1])
         nodes.append(final_invalid_2d)
@@ -253,7 +272,7 @@ class RTMPoseEndToEndConverter:
         return nodes
     
     def _create_all_constants(self):
-        """Create all constants - SIMPLIFIED VERSION with static reshape targets"""
+        """Create all constants - OPSET 11 COMPATIBLE"""
         constants = []
         
         # Index constants
@@ -261,10 +280,9 @@ class RTMPoseEndToEndConverter:
         constants.append(helper.make_tensor('one_idx', TensorProto.INT64, [], [1]))
         constants.append(helper.make_tensor('two_idx', TensorProto.INT64, [], [2]))
         
-        # *** KEY FIX: Use static reshape targets instead of dynamic Concat ***
-        # These work for common batch sizes - ONNX will handle dynamic sizing
-        constants.append(helper.make_tensor('nk2_target_shape', TensorProto.INT64, [3], [-1, -1, 2]))  # [-1, -1, 2]
-        constants.append(helper.make_tensor('nk_target_shape', TensorProto.INT64, [2], [-1, -1]))      # [-1, -1]
+        # Static reshape targets - works with opset 11
+        constants.append(helper.make_tensor('nk2_target_shape', TensorProto.INT64, [3], [-1, -1, 2]))
+        constants.append(helper.make_tensor('nk_target_shape', TensorProto.INT64, [2], [-1, -1]))
         
         # Shape constants for operations
         constants.append(helper.make_tensor('two_shape', TensorProto.INT64, [1], [2]))
@@ -304,7 +322,7 @@ class RTMPoseEndToEndConverter:
 
 def create_end_to_end_rtmpose_model(backbone_path, output_path, simcc_split_ratio=2.0, input_size=(256, 192)):
     """
-    BULLETPROOF function to create end-to-end RTMPose model
+    OPSET 11 COMPATIBLE function to create end-to-end RTMPose model
     """
     
     converter = RTMPoseEndToEndConverter(
@@ -341,17 +359,18 @@ def test_end_to_end_model(model_path, batch_size=4, num_keypoints=17):
     print("✅ Test successful!")
     print(f"   Input shapes: images {test_images.shape}, centers {test_centers.shape}, scales {test_scales.shape}")
     print(f"   Output shapes: keypoints {final_keypoints.shape}, scores {final_scores.shape}")
+    print(f"   ONNX Runtime version: {ort.__version__}")
     
     return final_keypoints, final_scores
 
 # Example usage
 if __name__ == "__main__":
     try:
-        print("🚀 Converting RTMPose model to end-to-end (BULLETPROOF VERSION)...")
+        print("🚀 Converting RTMPose model to end-to-end (OPSET 11 COMPATIBLE)...")
         
         end_to_end_model = create_end_to_end_rtmpose_model(
             backbone_path="rtmpose_backbone.onnx",
-            output_path="rtmpose_end_to_end_bulletproof.onnx",
+            output_path="rtmpose_end_to_end_opset11.onnx",
             simcc_split_ratio=2.0,
             input_size=(256, 192)
         )
@@ -359,7 +378,12 @@ if __name__ == "__main__":
         print("🧪 Testing the converted model...")
         test_end_to_end_model(end_to_end_model)
         
-        print("🎉 SUCCESS! BULLETPROOF end-to-end RTMPose model is ready!")
+        print("🎉 SUCCESS! OPSET 11 COMPATIBLE end-to-end RTMPose model is ready!")
+        print()
+        print("🔧 Compatibility:")
+        print("   • Works with older ONNX Runtime versions")
+        print("   • Uses only opset 11 operators")  
+        print("   • No LessOrEqual compatibility issues")
         print()
         print("🚀 Performance Benefits:")
         print("   • ~30-50% faster inference (no PyTorch overhead)")
@@ -368,7 +392,7 @@ if __name__ == "__main__":
         print()
         print("📝 Usage in your code:")
         print("   import onnxruntime as ort")
-        print("   session = ort.InferenceSession('rtmpose_end_to_end_bulletproof.onnx')")
+        print("   session = ort.InferenceSession('rtmpose_end_to_end_opset11.onnx')")
         print("   keypoints, scores = session.run(['final_keypoints', 'final_scores'], {")
         print("       'input': batch_images, 'centers': centers, 'scales': scales")
         print("   })")
@@ -379,12 +403,13 @@ if __name__ == "__main__":
         traceback.print_exc()
         
         print("\n💡 Troubleshooting:")
-        print("   1. Verify your RTMPose model outputs 'simcc_x' and 'simcc_y'")
-        print("   2. Check model file path and permissions")
-        print("   3. Ensure ONNX version: pip install --upgrade onnx")
+        print("   1. Check ONNX Runtime version: pip install --upgrade onnxruntime")
+        print("   2. Verify your RTMPose model outputs 'simcc_x' and 'simcc_y'")
+        print("   3. Check model file path and permissions")
+        print(f"   4. Current ONNX Runtime version: {ort.__version__ if 'ort' in locals() else 'Not loaded'}")
 
 """
-🎯 BULLETPROOF USAGE:
+🎯 OPSET 11 COMPATIBLE USAGE:
 
 # Convert your model (run once):
 create_end_to_end_rtmpose_model(
@@ -394,11 +419,11 @@ create_end_to_end_rtmpose_model(
     input_size=(256, 192)              # Your input size (W, H)
 )
 
-# New inference (replaces your entire workflow):
+# New inference (works with older ONNX Runtime):
 import onnxruntime as ort
 session = ort.InferenceSession("rtmpose_end_to_end.onnx")
 
-# Single call replaces: model inference + postprocess() + all loops
+# Single call replaces your entire workflow!
 final_keypoints, final_scores = session.run(
     ["final_keypoints", "final_scores"],
     {
@@ -408,5 +433,7 @@ final_keypoints, final_scores = session.run(
     }
 )
 
-# Results are identical to your postprocess() but MUCH faster!
+# Results are identical to your postprocess() function!
+print(f"Keypoints: {final_keypoints.shape}")  # [N, 17, 2]
+print(f"Scores: {final_scores.shape}")        # [N, 17]
 """
